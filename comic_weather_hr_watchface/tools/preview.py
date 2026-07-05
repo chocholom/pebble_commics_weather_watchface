@@ -478,20 +478,19 @@ def band_art(im, d):
     sparkle(d, 10, 163, 3.4, C['white'], seed=126)
 
 def burst_art(im, d):
-    # The starburst is drawn AFTER every panel so its spikes overlap the gutters
-    # and borders (classic comic layering). Spikes that would reach the scene
-    # blit rect (would be painted over) or dynamic text zones are shortened
-    # RADIALLY, so they stay pointy instead of getting a flat clamp.
+    # Spikes that would leave the action band are shortened RADIALLY (staying
+    # pointy, no flat clamp) so the burst fills its wedge edge-to-edge without
+    # spilling onto the calendar / scene / forecast tiles. Bounds follow the
+    # band's slanted edges (y = 86+0.075x top, 172-0.075x bottom) with a 2px
+    # margin, plus 3px at the bottom for the burst's drop shadow.
     cx, cy = 100, 129
     bp = []
-    for (px, py) in burst_pts(cx, cy, 101, 40, 68, 22, n=13, seed=9):
-        if py < cy:
-            bound = 98 if px > 74 else 84
-        else:
-            bound = 155 if px > 118 else 174
-        if (py < cy and py < bound) or (py > cy and py > bound):
-            t = (bound - cy) / (py - cy)
-            px, py = cx + (px - cx) * t, float(bound)
+    for (px, py) in burst_pts(cx, cy, 101, 37, 68, 22, n=13, seed=9):
+        for _ in range(2):  # bound depends on x, which moves when rescaling
+            bound = (88 + 0.075 * px) if py < cy else (167 - 0.075 * px)
+            if (py < cy and py < bound) or (py > cy and py > bound):
+                t = (bound - cy) / (py - cy)
+                px, py = cx + (px - cx) * t, float(bound)
         bp.append((px, py))
     d.polygon([xy((x + 2.5, y + 3)) for (x, y) in bp], fill=C['red_dk'])
     wpoly(d, bp, C['white'], C['ink'], 2.3, amp=0.6, seed=121)
@@ -508,8 +507,9 @@ def bottom_panels(im, d):
     wpoly(d, TMRW_POLY, None, C['ink'], 2.2, amp=0.5, seed=134)
 
 def captions_art(im):
-    # pasted last: captions sit on top of panels AND any burst tips underneath
-    caption(im, 27, 173, 42, 13, 'TODAY', F_CAP12, C['red'], tilt=-4.0, seed=135)
+    # pasted last; captions straddle their panel's top border and the gutter,
+    # but stay clear of the action band above
+    caption(im, 27, 173.5, 42, 12, 'TODAY', F_CAP12, C['red'], tilt=-4.0, seed=135)
     caption(im, 163, 167, 62, 12, 'TOMORROW', F_CAP10, C['blue'], tilt=3.0, seed=136)
 
 def base_layout():
