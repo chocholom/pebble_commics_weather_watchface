@@ -1,0 +1,13 @@
+# Pebble SDK build artifacts
+comic_weather_hr_watchface/build/
+comic_weather_hr_watchface/.lock-waf_*
+
+# npm
+comic_weather_hr_watchface/node_modules/
+
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store

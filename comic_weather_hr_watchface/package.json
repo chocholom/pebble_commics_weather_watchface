@@ -1,0 +1,161 @@
+{
+  "name": "comic-weather-hr",
+  "author": "Mirek + ChatGPT",
+  "version": "1.1.0",
+  "keywords": [
+    "pebble-app",
+    "watchface",
+    "weather",
+    "heart-rate"
+  ],
+  "private": true,
+  "dependencies": {
+    "@rebble/clay": "latest"
+  },
+  "pebble": {
+    "displayName": "Comic Weather HR",
+    "uuid": "47d8c8ba-420c-4d9c-a43b-e0a93f3078b2",
+    "sdkVersion": "3",
+    "enableMultiJS": true,
+    "targetPlatforms": [
+      "emery"
+    ],
+    "watchapp": {
+      "watchface": true
+    },
+    "capabilities": [
+      "location",
+      "configurable",
+      "health"
+    ],
+    "messageKeys": [
+      "REQUEST_WEATHER",
+      "WEATHER_TEMP_NOW",
+      "WEATHER_CODE_NOW",
+      "WEATHER_UPDATED",
+      "HOUR0_TEMP",
+      "HOUR0_CODE",
+      "HOUR0_POP",
+      "HOUR0_TIME",
+      "HOUR1_TEMP",
+      "HOUR1_CODE",
+      "HOUR1_POP",
+      "HOUR1_TIME",
+      "HOUR2_TEMP",
+      "HOUR2_CODE",
+      "HOUR2_POP",
+      "HOUR2_TIME",
+      "HOUR3_TEMP",
+      "HOUR3_CODE",
+      "HOUR3_POP",
+      "HOUR3_TIME",
+      "TODAY_MIN",
+      "TODAY_MAX",
+      "TODAY_CODE",
+      "TODAY_POP",
+      "TOMORROW_MIN",
+      "TOMORROW_MAX",
+      "TOMORROW_CODE",
+      "TOMORROW_POP",
+      "TimeFormat",
+      "TemperatureUnit",
+      "ForecastMode",
+      "ShowHeartRate",
+      "LiveHeartRate",
+      "RefreshMinutes"
+    ],
+    "resources": {
+      "media": [
+        {
+          "type": "font",
+          "name": "FONT_COMIC_44",
+          "file": "fonts/LilitaOne-Regular.ttf",
+          "characterRegex": "[0-9: ]"
+        },
+        {
+          "type": "font",
+          "name": "FONT_COMIC_26",
+          "file": "fonts/LilitaOne-Regular.ttf",
+          "characterRegex": "[0-9\u00b0 -]"
+        },
+        {
+          "type": "font",
+          "name": "FONT_COMIC_16",
+          "file": "fonts/LilitaOne-Regular.ttf",
+          "characterRegex": "[0-9:\u00b0/ -]"
+        },
+        {
+          "type": "font",
+          "name": "FONT_COMIC_14",
+          "file": "fonts/LilitaOne-Regular.ttf",
+          "characterRegex": "[0-9A-Z:\u00b0/%! -]"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT",
+          "file": "images/base_layout.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_CLEAR",
+          "file": "images/scene_clear.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_CLOUD",
+          "file": "images/scene_cloud.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_RAIN",
+          "file": "images/scene_rain.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_SNOW",
+          "file": "images/scene_snow.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_STORM",
+          "file": "images/scene_storm.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_SCENE_FOG",
+          "file": "images/scene_fog.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_CLEAR_SMALL",
+          "file": "images/icon_clear_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_CLOUD_SMALL",
+          "file": "images/icon_cloud_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_RAIN_SMALL",
+          "file": "images/icon_rain_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_SNOW_SMALL",
+          "file": "images/icon_snow_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_STORM_SMALL",
+          "file": "images/icon_storm_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_FOG_SMALL",
+          "file": "images/icon_fog_small.png"
+        }
+      ]
+    }
+  }
+}
