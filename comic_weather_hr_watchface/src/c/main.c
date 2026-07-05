@@ -1,4 +1,5 @@
 #include <pebble.h>
+#include "demo.h"
 
 #define SETTINGS_KEY 42
 #define MIN_REFRESH_MINUTES 15
@@ -113,6 +114,10 @@ static bool prv_use_24h(void) {
 }
 
 static void prv_format_time(char *buffer, size_t size) {
+#if DEMO_MODE
+  snprintf(buffer, size, "%s", DEMO_TIME);
+  return;
+#endif
   time_t now = time(NULL);
   struct tm *tick_time = localtime(&now);
   if (prv_use_24h()) {
@@ -198,6 +203,10 @@ static void prv_apply_hr_period(void) {
 }
 
 static void prv_update_heart_rate(void) {
+#if DEMO_MODE
+  s_heart_rate = DEMO_HR;
+  return;
+#endif
   if (!s_settings.ShowHeartRate) {
     s_heart_rate = -1;
     return;
@@ -213,6 +222,10 @@ static void prv_update_heart_rate(void) {
 }
 
 static void prv_update_step_count(void) {
+#if DEMO_MODE
+  s_step_count = DEMO_STEPS;
+  return;
+#endif
   HealthServiceAccessibilityMask access = health_service_metric_accessible(HealthMetricStepCount, time_start_of_today(), time(NULL));
   if (access & HealthServiceAccessibilityMaskAvailable) {
     s_step_count = (int)health_service_sum_today(HealthMetricStepCount);
@@ -428,7 +441,11 @@ static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
 }
 
 static void prv_battery_handler(BatteryChargeState charge_state) {
+#if DEMO_MODE
+  s_battery_level = DEMO_BATT;
+#else
   s_battery_level = charge_state.charge_percent;
+#endif
   layer_mark_dirty(s_canvas_layer);
 }
 
@@ -548,6 +565,9 @@ static void prv_outbox_failed_callback(DictionaryIterator *iterator, AppMessageR
 }
 
 static void prv_request_weather(void) {
+#if DEMO_MODE
+  return;  // keep the fake forecast; never fetch real weather
+#endif
   DictionaryIterator *iter;
   AppMessageResult result = app_message_outbox_begin(&iter);
   if (result != APP_MSG_OK || !iter) return;
@@ -611,6 +631,28 @@ static void prv_init_weather_defaults(void) {
   for (int i = 0; i < 4; i++) snprintf(s_weather.hour_label[i], sizeof(s_weather.hour_label[i]), "--");
 }
 
+#if DEMO_MODE
+static void prv_apply_demo(void) {
+  const char *labels[4] = DEMO_HOURS;
+  const int temps[4] = DEMO_HOUR_TEMPS;
+  const int codes[4] = DEMO_HOUR_CODES;
+  s_weather.valid = true;
+  s_weather.temp_now = DEMO_TEMP_NOW;
+  s_weather.code_now = DEMO_CODE_NOW;
+  for (int i = 0; i < 4; i++) {
+    s_weather.hour_temp[i] = temps[i];
+    s_weather.hour_code[i] = codes[i];
+    snprintf(s_weather.hour_label[i], sizeof(s_weather.hour_label[i]), "%s", labels[i]);
+  }
+  s_weather.tomorrow_min = DEMO_TMRW_MIN;
+  s_weather.tomorrow_max = DEMO_TMRW_MAX;
+  s_weather.tomorrow_code = DEMO_TMRW_CODE;
+  s_step_count = DEMO_STEPS;
+  s_heart_rate = DEMO_HR;
+  s_battery_level = DEMO_BATT;
+}
+#endif
+
 static void prv_init(void) {
   prv_load_settings();
   prv_init_weather_defaults();
@@ -645,6 +687,10 @@ static void prv_init(void) {
   app_message_open(1024, 128);
 
   app_timer_register(1500, prv_request_weather_timer, NULL);
+
+#if DEMO_MODE
+  prv_apply_demo();
+#endif
 }
 
 static void prv_deinit(void) {
