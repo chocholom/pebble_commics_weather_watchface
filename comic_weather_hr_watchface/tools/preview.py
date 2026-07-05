@@ -237,7 +237,10 @@ SCENE_W, SCENE_H = 116, 77
 SCENE_POLY = [(6, 0), (SCENE_W, 0), (SCENE_W, SCENE_H), (0, SCENE_H - 9)]
 
 def scene(kind):
-    im = Image.new('RGB', (SCENE_W * S, SCENE_H * S), C['paper'])
+    # RGBA: the areas outside the panel poly (slanted left + bottom gutters) are
+    # TRANSPARENT, not baked paper — the blit rect reaches into the action band's
+    # top-left corner, and an opaque corner would paint over the band.
+    im = Image.new('RGBA', (SCENE_W * S, SCENE_H * S), (255, 255, 255, 0))
     d = ImageDraw.Draw(im)
     sky = {'clear': C['sky_clear'], 'cloud': C['sky_cloud'], 'rain': C['sky_rain'],
            'snow': C['sky_snow'], 'storm': C['sky_storm'], 'fog': C['sky_fog']}[kind]
@@ -337,12 +340,18 @@ def scene(kind):
     dot = tuple(min(255, c + 85) for c in sky)
     benday(d, (6, 2, SCENE_W - 2, 20), dot, 10, 0.9)
 
-    # white gutters on the slanted left + bottom edges, then the wobbly ink frame
-    d.polygon([xy(p) for p in [(-1, -1), (6, -1), (-1, SCENE_H - 9)]], fill=C['paper'])
+    # punch the slanted left + bottom gutters transparent (ImageDraw writes raw
+    # pixel values, so zero-alpha fills erase), then the wobbly ink frame on top
+    d.polygon([xy(p) for p in [(-1, -1), (6, -1), (-1, SCENE_H - 9)]], fill=(255, 255, 255, 0))
     d.polygon([xy(p) for p in [(-1, SCENE_H - 9), (SCENE_W + 1, SCENE_H + 0.5),
-                               (SCENE_W + 1, SCENE_H + 1), (-1, SCENE_H + 1)]], fill=C['paper'])
+                               (SCENE_W + 1, SCENE_H + 1), (-1, SCENE_H + 1)]], fill=(255, 255, 255, 0))
     wpoly(d, SCENE_POLY, None, C['ink'], 2.2, amp=0.4, seed=55)
-    return pebblize(art_scale(im, SCENE_W, SCENE_H))
+    im = art_scale(im, SCENE_W, SCENE_H)
+    r, g, b, a = im.split()
+    rgb = pebblize(Image.merge('RGB', (r, g, b)))
+    a = a.point(lambda v: 255 if v >= 128 else 0)
+    rgb.putalpha(a)
+    return rgb
 
 # ---------------------------------------------------------------- small icons
 def _drop(d, cx, cy, r):
@@ -554,8 +563,8 @@ def cap_text(d, cx, cap_top, t, f, fill, stroke=0, shadow=0, shadow_fill=None, a
 def render_preview():
     export_assets()
     base = Image.open(RES / 'base_layout.png').convert('RGB').resize((W * S, H * S), Image.Resampling.NEAREST)
-    scn = Image.open(RES / 'scene_clear.png').resize((SCENE_W * S, SCENE_H * S), Image.Resampling.NEAREST)
-    base.paste(scn, (sc(84), sc(20)))
+    scn = Image.open(RES / 'scene_clear.png').convert('RGBA').resize((SCENE_W * S, SCENE_H * S), Image.Resampling.NEAREST)
+    base.paste(scn, (sc(84), sc(20)), scn)
     d = ImageDraw.Draw(base)
 
     # --- chips: steps / hr / battery (mirrors prv_draw_status_chips)

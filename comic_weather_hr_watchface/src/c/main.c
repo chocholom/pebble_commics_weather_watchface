@@ -311,9 +311,14 @@ static void prv_draw_calendar(GContext *ctx) {
 
 
 static void prv_draw_weather_scene(GContext *ctx) {
-  // Scene PNG carries its own slanted gutters + wobbly ink frame.
+  // Scene PNG carries its own slanted ink frame; the gutter corners are
+  // transparent so the action band underneath shows through (GCompOpSet).
   GBitmap *scene = prv_scene_for_code(s_weather.valid ? s_weather.code_now : 0);
-  if (scene) graphics_draw_bitmap_in_rect(ctx, scene, GRect(84, 20, 116, 77));
+  if (scene) {
+    graphics_context_set_compositing_mode(ctx, GCompOpSet);
+    graphics_draw_bitmap_in_rect(ctx, scene, GRect(84, 20, 116, 77));
+    graphics_context_set_compositing_mode(ctx, GCompOpAssign);
+  }
 
   // current temperature, white bubble numerals over the sky
   char temp[16];
