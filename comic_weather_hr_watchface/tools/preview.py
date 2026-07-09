@@ -44,6 +44,21 @@ C = {
     'batt_green': (0, 255, 0),
 }
 
+GUTTERS = {
+    'white': C['paper'],
+    'grey': C['steel'],
+    'black': C['ink'],
+}
+
+TOMORROW_THEMES = {
+    'nice': (C['yellow'], C['gold']),
+    'hot': (C['orange'], C['red']),
+    'rain': (C['blue'], C['blue_dk']),
+    'snow': (C['white'], C['sky_snow']),
+    'fog': (C['steel'], C['sky_storm']),
+    'cloud': (C['sky_cloud'], C['blue_sh']),
+}
+
 _PEBBLE_LUT = [min(255, int(round(i / 85.0)) * 85) for i in range(256)]
 def pebblize(im):
     # Sharpen the downscaled art before snapping to the 64-colour grid: this
@@ -504,15 +519,16 @@ def burst_art(im, d):
     d.polygon([xy((x + 2.5, y + 3)) for (x, y) in bp], fill=C['red_dk'])
     wpoly(d, bp, C['white'], C['ink'], 2.3, amp=0.6, seed=121)
 
-def bottom_panels(im, d):
+def bottom_panels(im, d, tomorrow_theme='nice'):
     # TODAY: cream + pink halftone, edges follow the tilted horizon
     d.polygon([xy(p) for p in TODAY_POLY], fill=C['cream'])
     benday(d, (4, 178, 123, 226), C['dot_pink'], 9, 1.0)
     wpoly(d, TODAY_POLY, None, C['ink'], 2.2, amp=0.5, seed=130)
     for cx, sd in ((32, 131), (62, 132), (92, 133)):
         wline(d, [(cx + 1, 174 - cx * 0.07), (cx - 1, 225)], C['ink'], 1.1, 0.5, seed=sd)
-    # TOMORROW: orange rays
-    rays_panel(im, TMRW_POLY, (165, 199), C['orange'], C['orange_ray'], n=12, rot=18)
+    # TOMORROW: forecast-coloured rays
+    base, ray = TOMORROW_THEMES[tomorrow_theme]
+    rays_panel(im, TMRW_POLY, (165, 199), base, ray, n=12, rot=18)
     wpoly(d, TMRW_POLY, None, C['ink'], 2.2, amp=0.5, seed=134)
 
 def captions_art(im):
@@ -521,28 +537,62 @@ def captions_art(im):
     caption(im, 27, 173.5, 42, 12, 'TODAY', F_CAP12, C['red'], tilt=-4.0, seed=135)
     caption(im, 163, 167, 62, 12, 'TOMORROW', F_CAP10, C['blue'], tilt=3.0, seed=136)
 
-def base_layout():
-    im = Image.new('RGB', (W * S, H * S), C['paper'])
+def base_layout(gutter='white', tomorrow_theme='nice'):
+    im = Image.new('RGB', (W * S, H * S), GUTTERS[gutter])
     d = ImageDraw.Draw(im)
     calendar_art(im, d)
     band_art(im, d)
-    bottom_panels(im, d)
+    bottom_panels(im, d, tomorrow_theme)
     burst_art(im, d)
     captions_art(im)
-    # status chips (numbers drawn by main.c), staggered + tilted
+    return pebblize(art_scale(im, W, H))
+
+CHIPS_H = 26  # overlay strip height; chips + tilt never reach below y=26
+
+def chips_overlay():
+    # Status chips (numbers drawn by main.c), staggered + tilted. A separate
+    # RGBA overlay instead of baked pixels so main.c can hide the whole strip
+    # (ShowStatusChips off) and the gutter colour shows through.
+    im = Image.new('RGBA', (W * S, CHIPS_H * S), (0, 0, 0, 0))
+    d = ImageDraw.Draw(im)
     chip(im, d, 2, 64, -2.4, 141, dy=2)
     chip(im, d, 70, 116, 2.0, 142, dy=0)
     chip(im, d, 122, 198, -1.6, 143, dy=3)
     shoe_glyph(d, 6, 5.5)
     heart_glyph(d, 75, 3.5)
     battery_glyph(d, 126, 8)
-    return pebblize(art_scale(im, W, H))
+    im = art_scale(im, W, CHIPS_H)
+    r, g, b, a = im.split()
+    rgb = Image.merge('RGB', (r, g, b)).point(_PEBBLE_LUT * 3)
+    a = a.point(lambda v: 255 if v >= 128 else 0)
+    rgb.putalpha(a)
+    return rgb
+
+def icon_blue(kind, size=22):
+    # Rain-chance fill variant: everything but the ink outline turns blue.
+    # main.c overlays the bottom pop% rows over the normal icon (water level).
+    im = icon(kind, size)
+    px = im.load()
+    for y in range(im.height):
+        for x in range(im.width):
+            r, g, b, a = px[x, y]
+            if a == 0:
+                continue
+            px[x, y] = (0, 0, 0, 255) if r + g + b <= 90 else C['blue'] + (255,)
+    return im
 
 def export_assets():
-    base_layout().save(RES / 'base_layout.png')
+    base_layout('white', 'nice').save(RES / 'base_layout.png')
+    for gutter in ['white', 'grey', 'black']:
+        for theme in ['nice', 'hot', 'rain', 'snow', 'fog', 'cloud']:
+            if gutter == 'white' and theme == 'nice':
+                continue
+            base_layout(gutter, theme).save(RES / f'base_layout_{gutter}_{theme}.png')
+    chips_overlay().save(RES / 'chips_overlay.png')
     for kind in ['clear', 'cloud', 'rain', 'snow', 'storm', 'fog']:
         scene(kind).save(RES / f'scene_{kind}.png')
         icon(kind, 22).save(RES / f'icon_{kind}_small.png')
+        icon_blue(kind, 22).save(RES / f'icon_{kind}_small_blue.png')
 
 # ---------------------------------------------------------------- mock preview
 def cap_text(d, cx, cap_top, t, f, fill, stroke=0, shadow=0, shadow_fill=None, align='c'):
@@ -562,7 +612,9 @@ def cap_text(d, cx, cap_top, t, f, fill, stroke=0, shadow=0, shadow_fill=None, a
 
 def render_preview():
     export_assets()
-    base = Image.open(RES / 'base_layout.png').convert('RGB').resize((W * S, H * S), Image.Resampling.NEAREST)
+    base = Image.open(RES / 'base_layout_white_hot.png').convert('RGB').resize((W * S, H * S), Image.Resampling.NEAREST)
+    ch = Image.open(RES / 'chips_overlay.png').convert('RGBA').resize((W * S, CHIPS_H * S), Image.Resampling.NEAREST)
+    base.paste(ch, (0, 0), ch)
     scn = Image.open(RES / 'scene_clear.png').convert('RGBA').resize((SCENE_W * S, SCENE_H * S), Image.Resampling.NEAREST)
     base.paste(scn, (sc(84), sc(20)), scn)
     d = ImageDraw.Draw(base)
@@ -592,17 +644,24 @@ def render_preview():
 
     # --- today panel
     cols = [16, 47, 77, 108]
-    hrs = [('08', '25', 'clear'), ('09', '26', 'cloud'), ('10', '27', 'cloud'), ('11', '28', 'clear')]
-    for cx, (hh, tmp, k) in zip(cols, hrs):
+    hrs = [('08', '25', 'clear', 0), ('09', '26', 'cloud', 30), ('10', '27', 'cloud', 65), ('11', '28', 'clear', 0)]
+    for cx, (hh, tmp, k, pop) in zip(cols, hrs):
         cap_text(d, cx, 181.5, hh, F_SMALL, C['ink'])
         ic = Image.open(RES / f'icon_{k}_small.png').convert('RGBA').resize((22 * S, 22 * S), Image.Resampling.NEAREST)
         base.paste(ic, (sc(cx - 11), sc(192)), ic)
+        rows = 22 * pop // 100  # rain-chance water level (mirrors main.c)
+        if rows:
+            bic = Image.open(RES / f'icon_{k}_small_blue.png').convert('RGBA').resize((22 * S, 22 * S), Image.Resampling.NEAREST)
+            crop = bic.crop((0, (22 - rows) * S, 22 * S, 22 * S))
+            base.paste(crop, (sc(cx - 11), sc(192 + 22 - rows)), crop)
         cap_text(d, cx, 214.5, tmp, F_MED, C['ink'])
 
     # --- tomorrow panel
     ic = Image.open(RES / 'icon_cloud_small.png').convert('RGBA').resize((22 * S, 22 * S), Image.Resampling.NEAREST)
     base.paste(ic, (sc(154), sc(180)), ic)
-    cap_text(d, 165, 209.5, '24/34', F_MED, C['ink'])
+    # white + ink outline, mirroring prv_draw_text_outline in main.c so the
+    # temps stay readable on dark tomorrow themes (rain, fog)
+    cap_text(d, 165, 209.5, '24/34', F_MED, C['white'], stroke=0.55)
 
     out = pebblize(base.resize((W, H), Image.Resampling.LANCZOS))
     out.save(PREV / 'mock_preview.png')

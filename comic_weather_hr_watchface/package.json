@@ -1,7 +1,7 @@
 {
   "name": "comic-weather-hr",
   "author": "chocholom",
-  "version": "1.1.0",
+  "version": "1.2.0",
   "keywords": [
     "pebble-app",
     "watchface",
@@ -33,6 +33,8 @@
       "WEATHER_TEMP_NOW",
       "WEATHER_CODE_NOW",
       "WEATHER_UPDATED",
+      "WEATHER_FETCHED_AT",
+      "WEATHER_ERROR",
       "HOUR0_TEMP",
       "HOUR0_CODE",
       "HOUR0_POP",
@@ -62,7 +64,11 @@
       "ForecastMode",
       "ShowHeartRate",
       "LiveHeartRate",
-      "RefreshMinutes"
+      "RefreshMinutes",
+      "DividerColor",
+      "HotThresholdC",
+      "ShowStatusChips",
+      "RainFill"
     ],
     "resources": {
       "media": [
@@ -94,6 +100,91 @@
           "type": "bitmap",
           "name": "IMAGE_BASE_LAYOUT",
           "file": "images/base_layout.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_WHITE_HOT",
+          "file": "images/base_layout_white_hot.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_WHITE_RAIN",
+          "file": "images/base_layout_white_rain.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_WHITE_SNOW",
+          "file": "images/base_layout_white_snow.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_WHITE_FOG",
+          "file": "images/base_layout_white_fog.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_WHITE_CLOUD",
+          "file": "images/base_layout_white_cloud.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_NICE",
+          "file": "images/base_layout_grey_nice.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_HOT",
+          "file": "images/base_layout_grey_hot.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_RAIN",
+          "file": "images/base_layout_grey_rain.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_SNOW",
+          "file": "images/base_layout_grey_snow.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_FOG",
+          "file": "images/base_layout_grey_fog.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_GREY_CLOUD",
+          "file": "images/base_layout_grey_cloud.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_NICE",
+          "file": "images/base_layout_black_nice.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_HOT",
+          "file": "images/base_layout_black_hot.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_RAIN",
+          "file": "images/base_layout_black_rain.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_SNOW",
+          "file": "images/base_layout_black_snow.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_FOG",
+          "file": "images/base_layout_black_fog.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_BASE_LAYOUT_BLACK_CLOUD",
+          "file": "images/base_layout_black_cloud.png"
         },
         {
           "type": "bitmap",
@@ -154,6 +245,41 @@
           "type": "bitmap",
           "name": "IMAGE_ICON_FOG_SMALL",
           "file": "images/icon_fog_small.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_CHIPS_OVERLAY",
+          "file": "images/chips_overlay.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_CLEAR_SMALL_BLUE",
+          "file": "images/icon_clear_small_blue.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_CLOUD_SMALL_BLUE",
+          "file": "images/icon_cloud_small_blue.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_RAIN_SMALL_BLUE",
+          "file": "images/icon_rain_small_blue.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_SNOW_SMALL_BLUE",
+          "file": "images/icon_snow_small_blue.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_STORM_SMALL_BLUE",
+          "file": "images/icon_storm_small_blue.png"
+        },
+        {
+          "type": "bitmap",
+          "name": "IMAGE_ICON_FOG_SMALL_BLUE",
+          "file": "images/icon_fog_small_blue.png"
         }
       ]
     }

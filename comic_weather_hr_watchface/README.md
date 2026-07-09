@@ -24,11 +24,44 @@ starburst holding the time. Visual direction inspired by the
 
 ## How it renders
 
-`resources/images/base_layout.png` is a full-screen static background drawn first
-(all the ink art, rays, chips, captions). `src/c/main.c` draws the dynamic content
-(time, date, weather, forecast, chips numbers) on top. The weather scenes are
-blitted per condition; the small forecast icons are RGBA PNGs composited with
-`GCompOpSet`.
+`resources/images/base_layout.png` is the default full-screen static background
+drawn first (all the ink art, rays, captions). `tools/preview.py` also
+generates base-layout variants for grey/black gutters and forecast-coloured
+TOMORROW panels. The status chips (steps / heart rate / battery) are a separate
+RGBA overlay (`chips_overlay.png`) so the whole strip can be hidden from
+settings. `src/c/main.c` loads only the currently needed base bitmap,
+then draws the dynamic content (time, date, weather, forecast, chips numbers)
+on top. The weather scenes are blitted per condition; the small forecast icons
+are RGBA PNGs composited with `GCompOpSet`.
+
+Hourly rain probability is shown by "flooding" each hourly icon from the bottom
+with blue (`icon_*_small_blue.png` cropped via sub-bitmap to the POP percentage);
+it can be turned off in settings. Time can be shown as 24h, 12h, or 12h with a
+small AM/PM tag on the action band.
+
+## Weather refresh, caching, and battery
+
+The watch requests weather at startup only when its persisted forecast is stale
+or missing, then refreshes by forecast age rather than by wall-clock minute
+modulo. The configurable refresh choices are 15, 30, 60, 120, and 180 minutes;
+new installs default to 60 minutes. If no forecast is available yet, failed
+initial fetches are retried at most every 15 minutes.
+
+Successful forecasts are cached in two places:
+
+- on the watch, via Pebble persistent storage, for instant display after app
+  restart and to skip fresh startup fetches;
+- on the phone JS side, via `localStorage`, so repeated requests inside the
+  selected refresh window can avoid both geolocation and network.
+
+When live location or Open-Meteo fails, the phone JS tries the last known
+coordinates and can fall back to cached weather up to 12 hours old. Cached
+payloads keep their original fetch timestamp, so stale fallback data does not
+reset the refresh age.
+
+For lowest battery use, set weather refresh to 2 or 3 hours and leave
+`LiveHeartRate` off. With `LiveHeartRate` off, the watchface only reads Pebble's
+normal heart-rate samples instead of requesting a 60-second sampling period.
 
 `tools/preview.py` generates **both** the PNG assets and `preview/mock_preview.png`,
 which simulates the on-device render (Pebble 64-colour palette, top-aligned text),
