@@ -58,7 +58,9 @@ function storageSet(key, value) {
 }
 
 function weatherCacheKey(useFahrenheit) {
-  return 'comic-weather-cache-v2-' + (useFahrenheit ? 'f' : 'c');
+  // Bump the version whenever the payload gains fields, so an upgraded app
+  // never serves a cached payload that lacks them.
+  return 'comic-weather-cache-v4-' + (useFahrenheit ? 'f' : 'c');
 }
 
 function locationCacheKey() {
@@ -148,6 +150,19 @@ function sendWeatherError(reason) {
   sendPayload({ WEATHER_ERROR: 1 }, 'weather error');
 }
 
+// Numeric coalescing that treats 0 as a real value: WMO code 0 = clear sky
+// and 0-degree temperatures must never fall through to the fallback.
+function numOr(value, fallback) {
+  var n = Number(value);
+  return (value == null || isNaN(n)) ? fallback : n;
+}
+
+function minutesOfDay(isoTime) {
+  var d = new Date(isoTime);
+  if (isNaN(d.getTime())) return 0;
+  return d.getHours() * 60 + d.getMinutes();
+}
+
 function sendWeather(json, useFahrenheit) {
   var hourly = json.hourly || {};
   var daily = json.daily || {};
@@ -156,8 +171,9 @@ function sendWeather(json, useFahrenheit) {
   var start = findCurrentHourIndex(times);
   var payload = {};
 
-  payload.WEATHER_TEMP_NOW = Math.round(current.temperature_2m || 0);
-  payload.WEATHER_CODE_NOW = Number(current.weather_code || 0);
+  payload.WEATHER_TEMP_NOW = Math.round(numOr(current.temperature_2m, 0));
+  payload.WEATHER_FEELS = Math.round(numOr(current.apparent_temperature, payload.WEATHER_TEMP_NOW));
+  payload.WEATHER_CODE_NOW = numOr(current.weather_code, 0);
 
   var now = new Date();
   payload.WEATHER_UPDATED = pad2(now.getHours()) + ':' + pad2(now.getMinutes());
@@ -165,20 +181,50 @@ function sendWeather(json, useFahrenheit) {
 
   for (var i = 0; i < 4; i++) {
     var idx = Math.min(start + i, Math.max(0, times.length - 1));
-    payload['HOUR' + i + '_TEMP'] = Math.round((hourly.temperature_2m || [])[idx] || 0);
-    payload['HOUR' + i + '_CODE'] = Number((hourly.weather_code || [])[idx] || 0);
-    payload['HOUR' + i + '_POP'] = Number((hourly.precipitation_probability || [])[idx] || 0);
+    payload['HOUR' + i + '_TEMP'] = Math.round(numOr((hourly.temperature_2m || [])[idx], 0));
+    payload['HOUR' + i + '_CODE'] = numOr((hourly.weather_code || [])[idx], 0);
+    payload['HOUR' + i + '_POP'] = numOr((hourly.precipitation_probability || [])[idx], 0);
     payload['HOUR' + i + '_TIME'] = hourLabel(times[idx] || '');
   }
 
-  payload.TODAY_MIN = Math.round((daily.temperature_2m_min || [])[0] || 0);
-  payload.TODAY_MAX = Math.round((daily.temperature_2m_max || [])[0] || 0);
-  payload.TODAY_CODE = Number((daily.weather_code || [])[0] || 0);
-  payload.TODAY_POP = Number((daily.precipitation_probability_max || [])[0] || 0);
-  payload.TOMORROW_MIN = Math.round((daily.temperature_2m_min || [])[1] || payload.TODAY_MIN);
-  payload.TOMORROW_MAX = Math.round((daily.temperature_2m_max || [])[1] || payload.TODAY_MAX);
-  payload.TOMORROW_CODE = Number((daily.weather_code || [])[1] || payload.TODAY_CODE);
-  payload.TOMORROW_POP = Number((daily.precipitation_probability_max || [])[1] || payload.TODAY_POP);
+  payload.TODAY_MIN = Math.round(numOr((daily.temperature_2m_min || [])[0], 0));
+  payload.TODAY_MAX = Math.round(numOr((daily.temperature_2m_max || [])[0], 0));
+  payload.TODAY_CODE = numOr((daily.weather_code || [])[0], 0);
+  payload.TODAY_POP = numOr((daily.precipitation_probability_max || [])[0], 0);
+  payload.TOMORROW_MIN = Math.round(numOr((daily.temperature_2m_min || [])[1], payload.TODAY_MIN));
+  payload.TOMORROW_MAX = Math.round(numOr((daily.temperature_2m_max || [])[1], payload.TODAY_MAX));
+  payload.TOMORROW_CODE = numOr((daily.weather_code || [])[1], payload.TODAY_CODE);
+  payload.TOMORROW_POP = numOr((daily.precipitation_probability_max || [])[1], payload.TODAY_POP);
+  payload.WEATHER_SUNRISE = minutesOfDay((daily.sunrise || [])[0]);
+  payload.WEATHER_SUNSET = minutesOfDay((daily.sunset || [])[0]);
+  payload.WEATHER_HUMIDITY = numOr(current.relative_humidity_2m, 0);
+  payload.WEATHER_WIND = Math.round(numOr(current.wind_speed_10m, 0));
+  payload.WEATHER_WIND_DIR = Math.round(numOr(current.wind_direction_10m, 0));
+
+  // Days +2 and +3 for the shake-overlay strip
+  for (var d = 2; d <= 3; d++) {
+    payload['DAY' + d + '_MIN'] = Math.round(numOr((daily.temperature_2m_min || [])[d], payload.TOMORROW_MIN));
+    payload['DAY' + d + '_MAX'] = Math.round(numOr((daily.temperature_2m_max || [])[d], payload.TOMORROW_MAX));
+    payload['DAY' + d + '_CODE'] = numOr((daily.weather_code || [])[d], payload.TOMORROW_CODE);
+  }
+
+  // 24h graph series, packed as byte arrays (temp: signed two's complement,
+  // rain: mm x10 capped at 25.5mm, wind: speed capped at 255).
+  var gTemp = [], gRain = [], gWind = [];
+  for (var h = 0; h < 24; h++) {
+    var gi = Math.min(start + h, Math.max(0, times.length - 1));
+    var tv = Math.round(numOr((hourly.temperature_2m || [])[gi], 0));
+    tv = Math.max(-128, Math.min(127, tv));
+    gTemp.push(tv & 0xFF);
+    var rv = Math.round(numOr((hourly.precipitation || [])[gi], 0) * 10);
+    gRain.push(Math.max(0, Math.min(255, rv)));
+    var wv = Math.round(numOr((hourly.wind_speed_10m || [])[gi], 0));
+    gWind.push(Math.max(0, Math.min(255, wv)));
+  }
+  payload.GRAPH_TEMP = gTemp;
+  payload.GRAPH_RAIN = gRain;
+  payload.GRAPH_WIND = gWind;
+  payload.GRAPH_START_HOUR = new Date(times[start] || Date.now()).getHours() || 0;
 
   writeWeatherCache(useFahrenheit, payload);
   sendPayload(payload, 'weather forecast');
@@ -189,12 +235,13 @@ function fetchWeatherAt(coords, useFahrenheit, errorCallback) {
   var url = 'https://api.open-meteo.com/v1/forecast?' +
     'latitude=' + encodeURIComponent(coords.latitude) +
     '&longitude=' + encodeURIComponent(coords.longitude) +
-    '&current=temperature_2m,weather_code' +
-    '&hourly=temperature_2m,weather_code,precipitation_probability' +
-    '&daily=temperature_2m_min,temperature_2m_max,weather_code,precipitation_probability_max' +
-    '&forecast_days=2' +
+    '&current=temperature_2m,apparent_temperature,weather_code,relative_humidity_2m,wind_speed_10m,wind_direction_10m' +
+    '&hourly=temperature_2m,weather_code,precipitation_probability,precipitation,wind_speed_10m' +
+    '&daily=temperature_2m_min,temperature_2m_max,weather_code,precipitation_probability_max,sunrise,sunset' +
+    '&forecast_days=4' +
     '&timezone=auto' +
-    '&temperature_unit=' + unit;
+    '&temperature_unit=' + unit +
+    (useFahrenheit ? '&wind_speed_unit=mph' : '');
 
   xhrRequest(url, 'GET', function (responseText) {
     try {

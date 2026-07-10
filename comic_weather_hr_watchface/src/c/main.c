@@ -9,6 +9,8 @@
 #define INITIAL_RETRY_MINUTES 15
 #define MAX_WEATHER_CACHE_AGE_HOURS 12
 #define DEFAULT_HOT_THRESHOLD_C 30
+#define SLEEP_REDUCED_REFRESH_MINUTES 240
+#define OVERLAY_HIDE_MS 8000
 
 // All colours sit on the Pebble 64-colour grid (channels in {0,85,170,255})
 // so they match the generated art exactly.
@@ -27,11 +29,20 @@ typedef struct ClaySettings {
   uint8_t HotThresholdC;    // tomorrow panel "hot" threshold, always stored in Celsius
   bool ShowStatusChips;     // steps / HR / battery strip at the top
   bool RainFill;            // fill hourly icons blue by rain probability
+  bool ShowFeelsLike;       // apparent temperature under the current temp
+  bool StaleBadge;          // grey temp + age tag when the forecast is old
+  uint8_t NightTheme;       // 0 = off, 1 = black gutters at night, 2 = grey
+  uint8_t ShakeAction;      // 0 = off, 1 = details page, 2 = details + graph
+  uint8_t SleepFetchMode;   // 0 = normal, 1 = reduced (4h), 2 = paused
+  uint16_t MorningFetchMin; // daily fetch at this minute-of-day even when paused; 0 = off
+  uint8_t SleepDetectMode;  // 0 = Pebble Health (on wrist), 1 = fixed 23:00-07:00
+  bool RelaxHrSleep;        // drop frequent HR sampling back to automatic while asleep
 } ClaySettings;
 
 typedef struct WeatherState {
   bool valid;
   int temp_now;
+  int feels_like;
   int code_now;
   int hour_temp[4];
   int hour_code[4];
@@ -47,7 +58,23 @@ typedef struct WeatherState {
   int tomorrow_pop;
   char updated[8];
   int32_t fetched_at;
+  int wind;               // current wind speed, display units (km/h or mph)
+  int wind_dir;           // current wind direction, degrees
+  int humidity;           // current relative humidity, %
+  int sunrise_min;        // minutes since local midnight, 0 = unknown
+  int sunset_min;
+  int day_min[2];         // days +2 and +3 for the shake overlay strip
+  int day_max[2];
+  int day_code[2];
+  int8_t graph_temp[24];  // next 24h, display units
+  uint8_t graph_rain[24]; // precipitation mm x10 (25.5mm cap)
+  uint8_t graph_wind[24]; // wind speed, display units
+  uint8_t graph_start_hour;
 } WeatherState;
+
+// The whole state must stay persistable as one blob.
+_Static_assert(sizeof(WeatherState) <= PERSIST_DATA_MAX_LENGTH,
+               "WeatherState exceeds persist limit; split the cache");
 
 typedef enum WeatherKind {
   WEATHER_CLEAR,
@@ -82,6 +109,9 @@ static bool s_bluetooth_connected = true;
 static int s_heart_rate = -1;
 static int s_step_count = 0;
 static int32_t s_last_weather_request_at = 0;
+static bool s_is_sleeping = false;
+static uint8_t s_overlay_page = 0;  // 0 = watchface, 1 = details, 2 = graph
+static AppTimer *s_overlay_timer = NULL;
 
 static GFont s_font_time;   // Lilita 40
 static GFont s_font_big;    // Lilita 26
@@ -130,6 +160,14 @@ static void prv_default_settings(void) {
   s_settings.HotThresholdC = DEFAULT_HOT_THRESHOLD_C;
   s_settings.ShowStatusChips = true;
   s_settings.RainFill = true;
+  s_settings.ShowFeelsLike = false;
+  s_settings.StaleBadge = true;
+  s_settings.NightTheme = 0;
+  s_settings.ShakeAction = 2;
+  s_settings.SleepFetchMode = 1;
+  s_settings.MorningFetchMin = 0;
+  s_settings.SleepDetectMode = 0;
+  s_settings.RelaxHrSleep = false;
 }
 
 static void prv_validate_settings(void) {
@@ -153,6 +191,11 @@ static void prv_validate_settings(void) {
   if (s_settings.HotThresholdC < 20 || s_settings.HotThresholdC > 45) {
     s_settings.HotThresholdC = DEFAULT_HOT_THRESHOLD_C;
   }
+  if (s_settings.NightTheme > 2) s_settings.NightTheme = 0;
+  if (s_settings.ShakeAction > 2) s_settings.ShakeAction = 2;
+  if (s_settings.SleepFetchMode > 2) s_settings.SleepFetchMode = 1;
+  if (s_settings.MorningFetchMin >= 24 * 60) s_settings.MorningFetchMin = 0;
+  if (s_settings.SleepDetectMode > 1) s_settings.SleepDetectMode = 0;
 }
 
 static void prv_load_settings(void) {
@@ -165,11 +208,33 @@ static void prv_save_settings(void) {
   persist_write_data(SETTINGS_KEY, &s_settings, sizeof(s_settings));
 }
 
+static bool prv_fetched_age_ok(int32_t fetched_at) {
+  if (fetched_at <= 0) return false;
+  int32_t age = (int32_t)time(NULL) - fetched_at;
+  // Negative tolerance covers the watch clock stepping backwards (resync)
+  // between a save and the next boot; ingest paths clamp to the watch clock.
+  return age >= -300 && age <= (MAX_WEATHER_CACHE_AGE_HOURS * 60 * 60);
+}
+
 static bool prv_weather_cache_age_ok(void) {
-  if (!s_weather.valid || s_weather.fetched_at <= 0) return false;
-  int32_t now = (int32_t)time(NULL);
-  int32_t age = now - s_weather.fetched_at;
-  return age >= 0 && age <= (MAX_WEATHER_CACHE_AGE_HOURS * 60 * 60);
+  return s_weather.valid && prv_fetched_age_ok(s_weather.fetched_at);
+}
+
+static int32_t prv_weather_age_seconds(void) {
+  if (!s_weather.valid || s_weather.fetched_at <= 0) return 0;
+  int32_t age = (int32_t)time(NULL) - s_weather.fetched_at;
+  return age > 0 ? age : 0;
+}
+
+static bool prv_weather_is_stale(void) {
+  // Stale = at least one whole refresh window has been missed.
+  return prv_weather_age_seconds() > 2 * (int32_t)s_settings.RefreshMinutes * 60;
+}
+
+static void prv_format_weather_age(char *buffer, size_t size) {
+  int32_t minutes = prv_weather_age_seconds() / 60;
+  if (minutes < 100) snprintf(buffer, size, "%ldM OLD", (long)minutes);
+  else snprintf(buffer, size, "%ldH OLD", (long)(minutes / 60));
 }
 
 static void prv_normalize_weather_strings(void) {
@@ -184,6 +249,10 @@ static void prv_load_weather_cache(void) {
   if (persist_read_data(WEATHER_CACHE_KEY, &cached, sizeof(cached)) == (int)sizeof(cached)) {
     s_weather = cached;
     prv_normalize_weather_strings();
+    // Same skew forgiveness as the receive path: a watch clock stepped
+    // backwards must not make a good cache look future-stamped.
+    int32_t now = (int32_t)time(NULL);
+    if (s_weather.fetched_at > now) s_weather.fetched_at = now;
     if (!prv_weather_cache_age_ok()) {
       s_weather.valid = false;
     }
@@ -324,10 +393,28 @@ static GBitmap *prv_blue_icon_for_code(int code) {
 }
 
 static void prv_apply_hr_period(void) {
-  if (s_settings.ShowHeartRate && s_settings.LiveHeartRate) {
-    health_service_set_heart_rate_sample_period(60);
+  bool frequent = s_settings.ShowHeartRate && s_settings.LiveHeartRate;
+  // Optionally fall back to Pebble's automatic schedule while asleep; off by
+  // default because frequent HR users may want sleep heart-rate data.
+  if (frequent && s_settings.RelaxHrSleep && s_is_sleeping) frequent = false;
+  health_service_set_heart_rate_sample_period(frequent ? 60 : 0);
+}
+
+static void prv_update_sleep_state(void) {
+  bool sleeping;
+  if (s_settings.SleepDetectMode == 1) {
+    // Fixed window: for watches not worn during sleep, where Health cannot
+    // detect it.
+    time_t now = time(NULL);
+    struct tm *t = localtime(&now);
+    sleeping = (t->tm_hour >= 23 || t->tm_hour < 7);
   } else {
-    health_service_set_heart_rate_sample_period(0);
+    HealthActivityMask activities = health_service_peek_current_activities();
+    sleeping = (activities & (HealthActivitySleep | HealthActivityRestfulSleep)) != 0;
+  }
+  if (sleeping != s_is_sleeping) {
+    s_is_sleeping = sleeping;
+    prv_apply_hr_period();
   }
 }
 
@@ -464,11 +551,33 @@ static void prv_draw_weather_scene(GContext *ctx) {
   }
 
   // current temperature, white bubble numerals over the sky
+  // (grey + age tag when at least one scheduled refresh has been missed)
   char temp[16];
   if (s_weather.valid) snprintf(temp, sizeof(temp), "%d°", s_weather.temp_now);
   else snprintf(temp, sizeof(temp), "--°");
+  bool stale = s_settings.StaleBadge && s_weather.valid && prv_weather_is_stale();
   prv_draw_text_outline(ctx, temp, s_font_big, GRect(100, 18, 92, 30),
-                        GColorWhite, GColorBlack, GTextAlignmentRight, 2);
+                        stale ? GColorLightGray : GColorWhite, GColorBlack, GTextAlignmentRight, 2);
+  if (stale) {
+    char age_text[12];
+    prv_format_weather_age(age_text, sizeof(age_text));
+    GSize age_sz = graphics_text_layout_get_content_size(age_text, s_font_small, GRect(0, 0, 80, 20),
+                                                         GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft);
+    graphics_context_set_fill_color(ctx, GColorBlack);
+    graphics_fill_rect(ctx, GRect(88, 22, age_sz.w + 9, 13), 2, GCornersAll);
+    graphics_context_set_text_color(ctx, GColorWhite);
+    graphics_draw_text(ctx, age_text, s_font_small, GRect(92, 21, age_sz.w + 2, 15),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  if (s_settings.ShowFeelsLike && s_weather.valid) {
+    // apparent temperature, small tag under the bubble numerals
+    // (no degree sign: Lilita's ° rasterises as a blob below ~20px)
+    char feels[16];
+    snprintf(feels, sizeof(feels), "FEELS %d", s_weather.feels_like);
+    prv_draw_text_outline(ctx, feels, s_font_small, GRect(100, 44, 92, 16),
+                          GColorWhite, GColorBlack, GTextAlignmentRight, 1);
+  }
 
   // condition caption box, bottom-left of the scene panel
   const char *cond = s_weather.valid ? prv_condition_label(s_weather.code_now) : "SYNCING";
@@ -560,8 +669,190 @@ static void prv_draw_tomorrow_panel(GContext *ctx) {
 
 
 
+// ---------------------------------------------------------------- shake overlay
+
+static void prv_draw_overlay_frame(GContext *ctx, GRect bounds, const char *title) {
+  graphics_context_set_fill_color(ctx, COLOR_PAPER);
+  graphics_fill_rect(ctx, bounds, 0, GCornerNone);
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_context_set_stroke_width(ctx, 3);
+  graphics_draw_round_rect(ctx, grect_inset(bounds, GEdgeInsets(2)), 5);
+
+  GSize sz = graphics_text_layout_get_content_size(title, s_font_small, GRect(0, 0, 160, 20),
+                                                   GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter);
+  int box_w = sz.w + 14;
+  graphics_context_set_fill_color(ctx, GColorBlack);
+  graphics_fill_rect(ctx, GRect((bounds.size.w - box_w) / 2, 7, box_w, 15), 2, GCornersAll);
+  graphics_context_set_text_color(ctx, GColorWhite);
+  graphics_draw_text(ctx, title, s_font_small, GRect((bounds.size.w - box_w) / 2, 6, box_w, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+}
+
+static const char *prv_compass_label(int deg) {
+  static const char *dirs[8] = {"N", "NE", "E", "SE", "S", "SW", "W", "NW"};
+  return dirs[((deg % 360 + 360 + 22) / 45) & 7];
+}
+
+static void prv_format_clock(char *buf, size_t size, int minutes) {
+  int h = minutes / 60, m = minutes % 60;
+  if (prv_use_24h()) {
+    snprintf(buf, size, "%d:%02d", h, m);
+  } else {
+    int h12 = h % 12; if (h12 == 0) h12 = 12;
+    snprintf(buf, size, "%d:%02d%s", h12, m, h < 12 ? "A" : "P");
+  }
+}
+
+static void prv_draw_detail_row(GContext *ctx, int y, const char *label, const char *value) {
+  graphics_context_set_text_color(ctx, GColorBlack);
+  graphics_draw_text(ctx, label, s_font_small, GRect(14, y + 2, 80, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  graphics_draw_text(ctx, value, s_font_med, GRect(70, y, 116, 20),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+}
+
+static void prv_draw_overlay_details(GContext *ctx, GRect bounds) {
+  prv_draw_overlay_frame(ctx, bounds, "WEATHER DETAILS");
+  const char *wind_unit = s_settings.TemperatureUnit ? "MPH" : "KM/H";
+  char value[32];
+
+  snprintf(value, sizeof(value), "%d", s_weather.feels_like);
+  prv_draw_detail_row(ctx, 28, "FEELS", value);
+  snprintf(value, sizeof(value), "%d %s %s", s_weather.wind, wind_unit, prv_compass_label(s_weather.wind_dir));
+  prv_draw_detail_row(ctx, 52, "WIND", value);
+  snprintf(value, sizeof(value), "%d%%", s_weather.humidity);
+  prv_draw_detail_row(ctx, 76, "HUMID", value);
+  int rain_sum = 0;
+  for (int i = 0; i < 24; i++) rain_sum += s_weather.graph_rain[i];
+  snprintf(value, sizeof(value), "%d.%d MM", rain_sum / 10, rain_sum % 10);
+  prv_draw_detail_row(ctx, 100, "RAIN 24H", value);
+  if (s_weather.sunrise_min > 0 && s_weather.sunset_min > 0) {
+    char rise[10], set[10];
+    prv_format_clock(rise, sizeof(rise), s_weather.sunrise_min);
+    prv_format_clock(set, sizeof(set), s_weather.sunset_min);
+    snprintf(value, sizeof(value), "%s-%s", rise, set);
+    prv_draw_detail_row(ctx, 124, "SUN", value);
+  }
+
+  // four-day strip: today, tomorrow, +2, +3
+  static const char *wd[7] = {"SUN", "MON", "TUE", "WED", "THU", "FRI", "SAT"};
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  const char *labels[4] = {"TODAY", "TMRW", wd[(t->tm_wday + 2) % 7], wd[(t->tm_wday + 3) % 7]};
+  int mins[4] = {s_weather.today_min, s_weather.tomorrow_min, s_weather.day_min[0], s_weather.day_min[1]};
+  int maxs[4] = {s_weather.today_max, s_weather.tomorrow_max, s_weather.day_max[0], s_weather.day_max[1]};
+  int codes[4] = {s_weather.today_code, s_weather.tomorrow_code, s_weather.day_code[0], s_weather.day_code[1]};
+
+  graphics_context_set_stroke_width(ctx, 1);
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_draw_line(ctx, GPoint(10, 152), GPoint(190, 152));
+  for (int i = 0; i < 4; i++) {
+    int cx = 25 + i * 50;
+    graphics_context_set_text_color(ctx, GColorBlack);
+    graphics_draw_text(ctx, labels[i], s_font_small, GRect(cx - 24, 155, 48, 16),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+    prv_draw_bitmap_centered(ctx, prv_icon_for_code(codes[i]), GRect(cx - 11, 172, 22, 22));
+    char mm[16];
+    snprintf(mm, sizeof(mm), "%d/%d", mins[i], maxs[i]);
+    graphics_draw_text(ctx, mm, s_font_small, GRect(cx - 24, 197, 48, 16),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentCenter, NULL);
+  }
+}
+
+static void prv_draw_overlay_graph(GContext *ctx, GRect bounds) {
+  prv_draw_overlay_frame(ctx, bounds, "NEXT 24H");
+  GRect chart = GRect(16, 44, 168, 88);
+
+  int tmin = 127, tmax = -128, rmax = 20;  // rmax floor = 2.0mm so drizzle stays small
+  int wmax = 1;
+  for (int i = 0; i < 24; i++) {
+    if (s_weather.graph_temp[i] < tmin) tmin = s_weather.graph_temp[i];
+    if (s_weather.graph_temp[i] > tmax) tmax = s_weather.graph_temp[i];
+    if (s_weather.graph_rain[i] > rmax) rmax = s_weather.graph_rain[i];
+    if (s_weather.graph_wind[i] > wmax) wmax = s_weather.graph_wind[i];
+  }
+  if (tmax <= tmin) tmax = tmin + 1;
+
+  // rain bars, blue, bottom-anchored
+  graphics_context_set_fill_color(ctx, GColorFromHEX(0x0055FF));
+  for (int i = 0; i < 24; i++) {
+    int h = chart.size.h * s_weather.graph_rain[i] / rmax;
+    if (h > chart.size.h) h = chart.size.h;
+    if (h > 0) {
+      graphics_fill_rect(ctx, GRect(chart.origin.x + i * 7, chart.origin.y + chart.size.h - h, 6, h),
+                         0, GCornerNone);
+    }
+  }
+
+  // temperature polyline, red
+  graphics_context_set_stroke_color(ctx, GColorFromHEX(0xFF0000));
+  graphics_context_set_stroke_width(ctx, 3);
+  GPoint prev = GPointZero;
+  for (int i = 0; i < 24; i++) {
+    int x = chart.origin.x + i * 7 + 3;
+    int y = chart.origin.y + chart.size.h - 5 -
+            (chart.size.h - 10) * (s_weather.graph_temp[i] - tmin) / (tmax - tmin);
+    GPoint p = GPoint(x, y);
+    if (i > 0) graphics_draw_line(ctx, prev, p);
+    prev = p;
+  }
+
+  // chart frame + scale labels
+  graphics_context_set_stroke_color(ctx, GColorBlack);
+  graphics_context_set_stroke_width(ctx, 2);
+  graphics_draw_rect(ctx, grect_inset(chart, GEdgeInsets(-2)));
+  char label[20];
+  graphics_context_set_text_color(ctx, GColorBlack);
+  snprintf(label, sizeof(label), "%d-%d", tmin, tmax);
+  graphics_draw_text(ctx, label, s_font_small, GRect(16, 24, 90, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  bool any_rain = false;
+  for (int i = 0; i < 24; i++) {
+    if (s_weather.graph_rain[i] > 0) { any_rain = true; break; }
+  }
+  if (any_rain) {  // scale label only when there are bars to read against it
+    snprintf(label, sizeof(label), "%d.%dMM", rmax / 10, rmax % 10);
+    graphics_draw_text(ctx, label, s_font_small, GRect(94, 24, 90, 16),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentRight, NULL);
+  }
+
+  // hour ticks every 6h
+  for (int i = 0; i < 24; i += 6) {
+    snprintf(label, sizeof(label), "%02d", (s_weather.graph_start_hour + i) % 24);
+    graphics_draw_text(ctx, label, s_font_small, GRect(chart.origin.x + i * 7 - 6, 136, 26, 16),
+                       GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+  }
+
+  // wind, grey polyline strip
+  GRect wchart = GRect(16, 178, 168, 36);
+  graphics_context_set_stroke_color(ctx, GColorFromHEX(0x555555));
+  graphics_context_set_stroke_width(ctx, 2);
+  for (int i = 1; i < 24; i++) {
+    GPoint a = GPoint(wchart.origin.x + (i - 1) * 7 + 3,
+                      wchart.origin.y + wchart.size.h - 2 -
+                      (wchart.size.h - 4) * s_weather.graph_wind[i - 1] / wmax);
+    GPoint b = GPoint(wchart.origin.x + i * 7 + 3,
+                      wchart.origin.y + wchart.size.h - 2 -
+                      (wchart.size.h - 4) * s_weather.graph_wind[i] / wmax);
+    graphics_draw_line(ctx, a, b);
+  }
+  snprintf(label, sizeof(label), "WIND MAX %d %s", wmax, s_settings.TemperatureUnit ? "MPH" : "KM/H");
+  graphics_draw_text(ctx, label, s_font_small, GRect(16, 158, 168, 16),
+                     GTextOverflowModeTrailingEllipsis, GTextAlignmentLeft, NULL);
+}
+
 static void prv_canvas_update_proc(Layer *layer, GContext *ctx) {
   GRect bounds = layer_get_bounds(layer);
+
+  if (s_overlay_page == 1 && s_weather.valid) {
+    prv_draw_overlay_details(ctx, bounds);
+    return;
+  }
+  if (s_overlay_page == 2 && s_weather.valid) {
+    prv_draw_overlay_graph(ctx, bounds);
+    return;
+  }
+
   prv_ensure_base_layout();
   if (s_img_base_layout) {
     graphics_draw_bitmap_in_rect(ctx, s_img_base_layout, bounds);
@@ -582,6 +873,11 @@ static void prv_canvas_update_proc(Layer *layer, GContext *ctx) {
   prv_draw_calendar(ctx);
   prv_draw_center_panel(ctx);
 
+  // While a timeline Quick View peek covers the bottom strip, the forecast
+  // panels are underneath it — skip them (everything else stays visible).
+  GRect unobstructed = layer_get_unobstructed_bounds(layer);
+  if (unobstructed.size.h < bounds.size.h) return;
+
   if (s_settings.ForecastMode == 0) {
     prv_draw_today_panel(ctx);
     prv_draw_tomorrow_panel(ctx);
@@ -600,9 +896,34 @@ static void prv_request_weather_timer(void *context);
 static void prv_tick_handler(struct tm *tick_time, TimeUnits units_changed) {
   (void)tick_time;
   if (units_changed & MINUTE_UNIT) {
+    prv_update_sleep_state();
     layer_mark_dirty(s_canvas_layer);
     prv_request_weather_if_due();
   }
+}
+
+static void prv_overlay_hide_timer(void *context) {
+  (void)context;
+  s_overlay_timer = NULL;
+  s_overlay_page = 0;
+  layer_mark_dirty(s_canvas_layer);
+}
+
+static void prv_accel_tap_handler(AccelAxisType axis, int32_t direction) {
+  (void)axis;
+  (void)direction;
+  if (s_settings.ShakeAction == 0 || !s_weather.valid) return;
+  uint8_t max_page = s_settings.ShakeAction;  // 1 = details only, 2 = + graph
+  s_overlay_page = (s_overlay_page >= max_page) ? 0 : (uint8_t)(s_overlay_page + 1);
+  if (s_overlay_timer) app_timer_cancel(s_overlay_timer);
+  s_overlay_timer = s_overlay_page
+      ? app_timer_register(OVERLAY_HIDE_MS, prv_overlay_hide_timer, NULL) : NULL;
+  layer_mark_dirty(s_canvas_layer);
+}
+
+static void prv_unobstructed_did_change(void *context) {
+  (void)context;
+  layer_mark_dirty(s_canvas_layer);
 }
 
 static void prv_battery_handler(BatteryChargeState charge_state) {
@@ -624,6 +945,12 @@ static void prv_health_handler(HealthEventType type, void *context) {
     prv_update_heart_rate();
     prv_update_step_count();
     layer_mark_dirty(s_canvas_layer);
+  }
+}
+
+static void prv_copy_tuple_bytes(uint8_t *dest, size_t len, Tuple *tuple) {
+  if (tuple && tuple->type == TUPLE_BYTE_ARRAY && tuple->length == len) {
+    memcpy(dest, tuple->value->data, len);
   }
 }
 
@@ -651,6 +978,8 @@ static void prv_inbox_received_callback(DictionaryIterator *iterator, void *cont
     s_weather.temp_now = prv_tuple_int(t, s_weather.temp_now);
     got_weather = true;
   }
+  t = dict_find(iterator, MESSAGE_KEY_WEATHER_FEELS);
+  if (t) s_weather.feels_like = prv_tuple_int(t, s_weather.temp_now);
   t = dict_find(iterator, MESSAGE_KEY_WEATHER_CODE_NOW);
   if (t) s_weather.code_now = prv_tuple_int(t, s_weather.code_now);
   prv_store_weather_string(s_weather.updated, sizeof(s_weather.updated), dict_find(iterator, MESSAGE_KEY_WEATHER_UPDATED), "--:--");
@@ -687,14 +1016,38 @@ static void prv_inbox_received_callback(DictionaryIterator *iterator, void *cont
   s_weather.tomorrow_max = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_TOMORROW_MAX), s_weather.tomorrow_max);
   s_weather.tomorrow_code = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_TOMORROW_CODE), s_weather.tomorrow_code);
   s_weather.tomorrow_pop = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_TOMORROW_POP), s_weather.tomorrow_pop);
+  s_weather.wind = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_WIND), s_weather.wind);
+  s_weather.wind_dir = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_WIND_DIR), s_weather.wind_dir);
+  s_weather.humidity = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_HUMIDITY), s_weather.humidity);
+  s_weather.sunrise_min = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_SUNRISE), s_weather.sunrise_min);
+  s_weather.sunset_min = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_SUNSET), s_weather.sunset_min);
+  s_weather.day_min[0] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY2_MIN), s_weather.day_min[0]);
+  s_weather.day_max[0] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY2_MAX), s_weather.day_max[0]);
+  s_weather.day_code[0] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY2_CODE), s_weather.day_code[0]);
+  s_weather.day_min[1] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY3_MIN), s_weather.day_min[1]);
+  s_weather.day_max[1] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY3_MAX), s_weather.day_max[1]);
+  s_weather.day_code[1] = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_DAY3_CODE), s_weather.day_code[1]);
+  prv_copy_tuple_bytes((uint8_t *)s_weather.graph_temp, sizeof(s_weather.graph_temp),
+                       dict_find(iterator, MESSAGE_KEY_GRAPH_TEMP));
+  prv_copy_tuple_bytes(s_weather.graph_rain, sizeof(s_weather.graph_rain),
+                       dict_find(iterator, MESSAGE_KEY_GRAPH_RAIN));
+  prv_copy_tuple_bytes(s_weather.graph_wind, sizeof(s_weather.graph_wind),
+                       dict_find(iterator, MESSAGE_KEY_GRAPH_WIND));
+  s_weather.graph_start_hour = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_GRAPH_START_HOUR), s_weather.graph_start_hour);
 
   if (got_weather) {
-    s_weather.fetched_at = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_FETCHED_AT), (int)time(NULL));
+    int32_t now = (int32_t)time(NULL);
+    int32_t raw_fetched_at = prv_tuple_int(dict_find(iterator, MESSAGE_KEY_WEATHER_FETCHED_AT), now);
+    // The phone stamps payloads with its own clock; clamp future timestamps
+    // instead of rejecting them so clock skew cannot blank a fresh forecast.
+    s_weather.fetched_at = (raw_fetched_at <= 0 || raw_fetched_at > now) ? now : raw_fetched_at;
+    // A delivered payload is the best data available (the phone already
+    // enforces its 12h staleness policy) — always display it. Persist only
+    // when the RAW timestamp is plausible, so a phone clock jumped far into
+    // the future cannot launder ancient data into a fresh boot cache.
     s_weather.valid = true;
-    if (prv_weather_cache_age_ok()) {
+    if (prv_fetched_age_ok(raw_fetched_at)) {
       prv_save_weather_cache();
-    } else {
-      s_weather.valid = false;
     }
   }
 
@@ -709,6 +1062,14 @@ static void prv_inbox_received_callback(DictionaryIterator *iterator, void *cont
   Tuple *hot_threshold = dict_find(iterator, MESSAGE_KEY_HotThresholdC);
   Tuple *show_chips = dict_find(iterator, MESSAGE_KEY_ShowStatusChips);
   Tuple *rain_fill = dict_find(iterator, MESSAGE_KEY_RainFill);
+  Tuple *feels_like = dict_find(iterator, MESSAGE_KEY_ShowFeelsLike);
+  Tuple *stale_badge = dict_find(iterator, MESSAGE_KEY_StaleBadge);
+  Tuple *night_theme = dict_find(iterator, MESSAGE_KEY_NightTheme);
+  Tuple *shake_action = dict_find(iterator, MESSAGE_KEY_ShakeAction);
+  Tuple *sleep_fetch = dict_find(iterator, MESSAGE_KEY_SleepFetchMode);
+  Tuple *morning_fetch = dict_find(iterator, MESSAGE_KEY_MorningFetchMin);
+  Tuple *sleep_detect = dict_find(iterator, MESSAGE_KEY_SleepDetectMode);
+  Tuple *relax_hr = dict_find(iterator, MESSAGE_KEY_RelaxHrSleep);
 
   if (time_format) { s_settings.TimeFormat = prv_tuple_int(time_format, s_settings.TimeFormat); changed = true; }
   if (temp_unit) {
@@ -754,6 +1115,14 @@ static void prv_inbox_received_callback(DictionaryIterator *iterator, void *cont
   }
   if (show_chips) { s_settings.ShowStatusChips = prv_tuple_int(show_chips, s_settings.ShowStatusChips) ? true : false; changed = true; }
   if (rain_fill) { s_settings.RainFill = prv_tuple_int(rain_fill, s_settings.RainFill) ? true : false; changed = true; }
+  if (feels_like) { s_settings.ShowFeelsLike = prv_tuple_int(feels_like, s_settings.ShowFeelsLike) ? true : false; changed = true; }
+  if (stale_badge) { s_settings.StaleBadge = prv_tuple_int(stale_badge, s_settings.StaleBadge) ? true : false; changed = true; }
+  if (night_theme) { s_settings.NightTheme = prv_tuple_int(night_theme, s_settings.NightTheme); changed = true; }
+  if (shake_action) { s_settings.ShakeAction = prv_tuple_int(shake_action, s_settings.ShakeAction); changed = true; }
+  if (sleep_fetch) { s_settings.SleepFetchMode = prv_tuple_int(sleep_fetch, s_settings.SleepFetchMode); changed = true; }
+  if (morning_fetch) { s_settings.MorningFetchMin = prv_tuple_int(morning_fetch, s_settings.MorningFetchMin); changed = true; }
+  if (sleep_detect) { s_settings.SleepDetectMode = prv_tuple_int(sleep_detect, s_settings.SleepDetectMode); changed = true; }
+  if (relax_hr) { s_settings.RelaxHrSleep = prv_tuple_int(relax_hr, s_settings.RelaxHrSleep) ? true : false; changed = true; }
 
   if (changed) {
     prv_validate_settings();
@@ -788,15 +1157,47 @@ static void prv_request_weather(void) {
   app_message_outbox_send();
 }
 
+static bool prv_in_morning_fetch_window(void) {
+  if (s_settings.MorningFetchMin == 0) return false;
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int now_min = t->tm_hour * 60 + t->tm_min;
+  // A 15-minute window paired with the 15-minute failure retry gives the
+  // daily fetch one or two attempts without ever looping.
+  return now_min >= s_settings.MorningFetchMin && now_min < s_settings.MorningFetchMin + 15;
+}
+
 static bool prv_weather_due_for_refresh(void) {
 #if DEMO_MODE
   return false;
 #endif
   int32_t now = (int32_t)time(NULL);
-  int32_t retry_seconds = s_weather.valid ? (s_settings.RefreshMinutes * 60) : (INITIAL_RETRY_MINUTES * 60);
+  int32_t refresh_seconds = s_settings.RefreshMinutes * 60;
+  bool morning_override = false;
+
+  if (s_is_sleeping) {
+    if (prv_in_morning_fetch_window() && prv_weather_age_seconds() > 60 * 60) {
+      // The configured wake-up fetch runs even in paused mode.
+      morning_override = true;
+    } else if (s_settings.SleepFetchMode == 2) {
+      return false;  // paused while sleeping
+    } else if (s_settings.SleepFetchMode == 1) {
+      if (refresh_seconds < SLEEP_REDUCED_REFRESH_MINUTES * 60) {
+        refresh_seconds = SLEEP_REDUCED_REFRESH_MINUTES * 60;
+      }
+    }
+  }
+
+  int32_t retry_seconds = s_weather.valid ? refresh_seconds : (INITIAL_RETRY_MINUTES * 60);
+  if (morning_override && retry_seconds > INITIAL_RETRY_MINUTES * 60) {
+    retry_seconds = INITIAL_RETRY_MINUTES * 60;
+  }
 
   if (s_last_weather_request_at > 0 && now - s_last_weather_request_at < retry_seconds) {
     return false;
+  }
+  if (morning_override) {
+    return true;
   }
   if (!s_weather.valid) {
     return true;
@@ -804,7 +1205,7 @@ static bool prv_weather_due_for_refresh(void) {
   if (s_weather.fetched_at <= 0) {
     return true;
   }
-  return now - s_weather.fetched_at >= s_settings.RefreshMinutes * 60;
+  return now - s_weather.fetched_at >= refresh_seconds;
 }
 
 static void prv_request_weather_if_due(void) {
@@ -818,8 +1219,20 @@ static void prv_request_weather_timer(void *context) {
   prv_request_weather_if_due();
 }
 
+static bool prv_is_night(void) {
+  if (!s_settings.NightTheme || !s_weather.valid) return false;
+  if (s_weather.sunrise_min <= 0 || s_weather.sunset_min <= 0) return false;
+  time_t now = time(NULL);
+  struct tm *t = localtime(&now);
+  int now_min = t->tm_hour * 60 + t->tm_min;
+  return now_min < s_weather.sunrise_min || now_min >= s_weather.sunset_min;
+}
+
 static uint32_t prv_base_resource_for_state(void) {
   int divider = s_settings.DividerColor;
+  if (prv_is_night()) {
+    divider = (s_settings.NightTheme == 2) ? DIVIDER_GREY : DIVIDER_BLACK;
+  }
   if (divider < DIVIDER_WHITE || divider > DIVIDER_BLACK) divider = DIVIDER_WHITE;
 
   static const uint32_t resources[3][6] = {
@@ -941,6 +1354,7 @@ static void prv_apply_demo(void) {
   const int pops[4] = DEMO_HOUR_POPS;
   s_weather.valid = true;
   s_weather.temp_now = DEMO_TEMP_NOW;
+  s_weather.feels_like = DEMO_TEMP_NOW - 2;
   s_weather.code_now = DEMO_CODE_NOW;
   for (int i = 0; i < 4; i++) {
     s_weather.hour_temp[i] = temps[i];
@@ -951,6 +1365,27 @@ static void prv_apply_demo(void) {
   s_weather.tomorrow_min = DEMO_TMRW_MIN;
   s_weather.tomorrow_max = DEMO_TMRW_MAX;
   s_weather.tomorrow_code = DEMO_TMRW_CODE;
+  // Overlay data derived from the scenario values so store screenshots can
+  // show the shake pages without extra demo.h fields.
+  s_weather.today_min = temps[0] - 2;
+  s_weather.today_max = temps[3] + 2;
+  s_weather.today_code = DEMO_CODE_NOW;
+  s_weather.wind = 14;
+  s_weather.wind_dir = 315;
+  s_weather.humidity = 55;
+  s_weather.sunrise_min = 5 * 60 + 8;
+  s_weather.sunset_min = 21 * 60 + 14;
+  for (int d = 0; d < 2; d++) {
+    s_weather.day_min[d] = DEMO_TMRW_MIN - 1 - d;
+    s_weather.day_max[d] = DEMO_TMRW_MAX - 2 * d;
+    s_weather.day_code[d] = d ? 61 : DEMO_TMRW_CODE;
+  }
+  for (int h = 0; h < 24; h++) {
+    s_weather.graph_temp[h] = (int8_t)(DEMO_TEMP_NOW - 4 + (h < 12 ? h : 24 - h) * 2 / 3);
+    s_weather.graph_rain[h] = (h >= 14 && h <= 19) ? (uint8_t)((h - 13) * 8) : 0;
+    s_weather.graph_wind[h] = (uint8_t)(8 + (h % 6) * 3);
+  }
+  s_weather.graph_start_hour = 8;
   s_weather.fetched_at = (int32_t)time(NULL);
   s_step_count = DEMO_STEPS;
   s_heart_rate = DEMO_HR;
@@ -985,6 +1420,10 @@ static void prv_init(void) {
   battery_state_service_subscribe(prv_battery_handler);
   bluetooth_connection_service_subscribe(prv_bluetooth_handler);
   health_service_events_subscribe(prv_health_handler, NULL);
+  accel_tap_service_subscribe(prv_accel_tap_handler);
+  unobstructed_area_service_subscribe((UnobstructedAreaHandlers) {
+    .did_change = prv_unobstructed_did_change,
+  }, NULL);
 
   prv_battery_handler(battery_state_service_peek());
   s_bluetooth_connected = bluetooth_connection_service_peek();
@@ -1003,6 +1442,8 @@ static void prv_init(void) {
 static void prv_deinit(void) {
   health_service_set_heart_rate_sample_period(0);
   health_service_events_unsubscribe();
+  accel_tap_service_unsubscribe();
+  unobstructed_area_service_unsubscribe();
   tick_timer_service_unsubscribe();
   battery_state_service_unsubscribe();
   bluetooth_connection_service_unsubscribe();

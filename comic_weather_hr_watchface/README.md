@@ -39,6 +39,28 @@ with blue (`icon_*_small_blue.png` cropped via sub-bitmap to the POP percentage)
 it can be turned off in settings. Time can be shown as 24h, 12h, or 12h with a
 small AM/PM tag on the action band.
 
+## Shake to reveal, night theme, stale badge, Quick View
+
+A wrist flick cycles two temporary overlay pages (configurable, auto-hide
+after 8 s): a details card (feels-like, wind, humidity, 24h rain total,
+sunrise/sunset, four-day strip) and a 24h chart (temperature line, rain bars,
+wind strip) fed by three 24-byte arrays in the AppMessage payload.
+
+The optional night theme switches the gutters to black or grey between sunset
+and sunrise (times come from Open-Meteo's daily block). When a forecast is
+older than twice the refresh interval, the current temperature turns grey and
+an age tag appears (configurable). During a timeline Quick View peek the
+bottom forecast panels are skipped; everything else stays visible.
+
+## Sleep-aware battery saving
+
+While the wearer sleeps (Pebble Health detection, or fixed 23:00-07:00 hours
+for watches not worn at night), weather fetches can run on a reduced 4-hour
+schedule or pause entirely — with an optional fixed morning fetch time so the
+forecast is fresh on wake-up. Frequent heart-rate sampling can optionally drop
+back to Pebble's automatic schedule while asleep (off by default, since
+frequent-HR users may want sleep data).
+
 ## Weather refresh, caching, and battery
 
 The watch requests weather at startup only when its persisted forecast is stale
